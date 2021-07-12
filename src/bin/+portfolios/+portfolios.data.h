@@ -6,6 +6,7 @@ namespace analpaper {
                    public Client::Broadcast<Settings>,
                    public Client::Clickable {
     string currency = "";
+      bool zeroed   = true;
     private_ref:
       const KryptoNinja &K;
     public:
@@ -17,6 +18,7 @@ namespace analpaper {
       {};
       void from_json(const json &j) {
         currency = j.value("currency", K.gateway->quote);
+        zeroed   = j.value("zeroed", zeroed);
         if (currency.empty()) currency = K.gateway->quote;
         K.clicked(this);
       };
@@ -38,14 +40,15 @@ namespace analpaper {
   };
   static void to_json(json &j, const Settings &k) {
     j = {
-      {"currency", k.currency}
+      {"currency", k.currency},
+      {  "zeroed", k.zeroed  }
     };
   };
   static void from_json(const json &j, Settings &k) {
     k.from_json(j);
   };
 
-  struct Portfolio  {
+  struct Portfolio {
     Wallet wallet;
     unordered_map<string, Price> prices;
     Price price;
@@ -53,56 +56,45 @@ namespace analpaper {
   static void to_json(json &j, const Portfolio &k) {
     j = {
       {"wallet", k.wallet},
-      {"prices", k.prices},
       { "price", k.price }
     };
   };
 
-  struct Portfolios: public Client::Broadcast<Portfolio>,
-                     public Client::Clicked {
+  struct Portfolios: public Client::Broadcast<Portfolios> {
     Settings settings;
     unordered_map<string, Portfolio> portfolio;
-    private:
-      string last = "";
     private_ref:
       const KryptoNinja &K;
     public:
       Portfolios(const KryptoNinja &bot)
         : Broadcast(bot)
-        , Clicked(bot, {
-            {&settings, [&]() { refresh(); }}
-          })
         , settings(bot)
         , K(bot)
       {};
-      void calc(const string &currency) {
-        last = currency;
-        if (portfolio[last].wallet.currency.empty())
-          portfolio[last].wallet.currency = last;
-        portfolio[last].wallet.value = (
-          portfolio[last].price = calc()
-        ) * portfolio[last].wallet.total;
-        broadcast();
-        K.repaint();
-      };
-      Price calc() const {
-        if (last == settings.currency)
+      Price calc(const string &from) const {
+        if (from == settings.currency)
           return 1;
-        if (portfolio.at(last).prices.find(settings.currency) != portfolio.at(last).prices.end())
-          return portfolio.at(last).prices.at(settings.currency);
-        else for (const auto &it : portfolio.at(last).prices)
-          if (portfolio.find(it.first) != portfolio.end())
+        if (portfolio.at(from).prices.find(settings.currency) != portfolio.at(from).prices.end())
+          return portfolio.at(from).prices.at(settings.currency);
+        else for (const auto &it : portfolio.at(from).prices)
+          if (portfolio.find(it.first) != portfolio.end()) {
             if (portfolio.at(it.first).prices.find(settings.currency) != portfolio.at(it.first).prices.end())
               return it.second * portfolio.at(it.first).prices.at(settings.currency);
             else for (const auto &_it : portfolio.at(it.first).prices)
               if (portfolio.find(_it.first) != portfolio.end()
                 and portfolio.at(_it.first).prices.find(settings.currency) != portfolio.at(_it.first).prices.end()
               ) return it.second * _it.second * portfolio.at(_it.first).prices.at(settings.currency);
+          }
         return 0;
       };
-      void refresh() {
+      void calc() {
         for (auto &it : portfolio)
-          calc(it.first);
+          portfolio.at(it.first).wallet.value = (
+            portfolio.at(it.first).price = calc(it.first)
+          ) * portfolio.at(it.first).wallet.total;
+        if (ratelimit()) return;
+        broadcast();
+        K.repaint();
       };
       bool ready() const {
         const bool err = portfolio.empty();
@@ -113,47 +105,126 @@ namespace analpaper {
       mMatter about() const override {
         return mMatter::Position;
       };
-      json blob() const override {
-        if (portfolio.find(last) != portfolio.end()
-          // and !portfolio.at(last).prices.empty()
-        ) return portfolio.at(last);
-        else return nullptr;
-      };
-      json hello() override {
-        json j = json::array();
-        for (const auto &it : portfolio)
-          // if (!it.second.prices.empty())
-            j.push_back(it.second);
-        return j;
+    private:
+      bool ratelimit() {
+        return !read_soon();
       };
   };
+  static void to_json(json &j, const Portfolios &k) {
+    j = json::array();
+    for (const auto &it : k.portfolio)
+      if (it.second.price)
+        j.push_back(it.second);
+  };
 
-  struct Tickers {
-    unordered_map<string, Ticker> ticker;
+  struct Market {
+    string web;
+     Price spread,
+           raw_spread;
+    double open;
+    Amount volume,
+           raw_volume;
+  };
+  static void to_json(json &j, const Market &k) {
+    j = {
+      {   "web", k.web   },
+      {"spread", k.spread},
+      {  "open", k.open  },
+      {"volume", k.volume}
+    };
+  };
+
+  struct Markets: public Client::Broadcast<Markets> {
+    unordered_map<string, unordered_map<string, Market>> market;
     private_ref:
-      Portfolios &portolios;
+      const KryptoNinja &K;
     public:
-      Tickers(Portfolios &p)
-        : portolios(p)
+      Markets(const KryptoNinja &bot)
+        : Broadcast(bot)
+        , K(bot)
+      {};
+      void add(const Ticker &raw) {
+        market[raw.base][raw.quote] = {
+          K.gateway->web(raw.base, raw.quote),
+          0,
+          raw.spread,
+          raw.open,
+          0,
+          raw.volume
+        };
+      };
+      void calc(const string &base, const string &quote, const Price &volume, const Price &spread) {
+        market[base][quote].spread = spread;
+        market[base][quote].volume = volume;
+        if (ratelimit()) return;
+        broadcast();
+      };
+      mMatter about() const override {
+        return mMatter::MarketData;
+      };
+    private:
+      bool ratelimit() {
+        return !read_soon(1e+3);
+      };
+  };
+  static void to_json(json &j, const Markets &k) {
+    j = k.market;
+  };
+
+  struct Tickers: public Client::Clicked {
+    Markets markets;
+    private_ref:
+      Portfolios &portfolios;
+    public:
+      Tickers(const KryptoNinja &bot, Portfolios &p)
+        : Clicked(bot, {
+            {&p.settings, [&]() { calc(); }}
+          })
+        , markets(bot)
+        , portfolios(p)
       {};
       void read_from_gw(const Ticker &raw) {
-        portolios.portfolio[raw.base].prices[raw.quote] = raw.price;
-        portolios.portfolio[raw.quote].prices[raw.base] = 1 / raw.price;
-        portolios.calc(raw.base);
-        portolios.calc(raw.quote);
+        add(raw.base,  raw.quote,     raw.price);
+        add(raw.quote, raw.base,  1 / raw.price);
+        portfolios.calc();
+        markets.add(raw);
+        markets.calc(
+          raw.base,
+          raw.quote,
+          raw.volume * portfolios.portfolio.at(raw.base).price,
+          raw.spread * portfolios.portfolio.at(raw.quote).price
+        );
+      };
+    private:
+      void calc() {
+        portfolios.calc();
+        for (auto &it : markets.market)
+          for (auto &_it : it.second) {
+            markets.calc(
+              it.first,
+              _it.first,
+              _it.second.raw_volume * portfolios.portfolio.at(it.first).price,
+              _it.second.raw_spread * portfolios.portfolio.at(_it.first).price
+            );
+          }
+      };
+      void add(const string &base, const string &quote, const Price &price) {
+        portfolios.portfolio[base].prices[quote] = price;
+        if (portfolios.portfolio.at(base).wallet.currency.empty())
+          portfolios.portfolio.at(base).wallet.currency = base;
       };
   };
 
   struct Wallets {
     private_ref:
-      Portfolios &portolios;
+      Portfolios &portfolios;
     public:
       Wallets(Portfolios &p)
-        : portolios(p)
+        : portfolios(p)
       {};
       void read_from_gw(const Wallet &raw) {
-        portolios.portfolio[raw.currency].wallet = raw;
-        portolios.calc(raw.currency);
+        portfolios.portfolio[raw.currency].wallet = raw;
+        portfolios.calc();
       };
   };
 
@@ -213,8 +284,8 @@ namespace analpaper {
           {      "quote", K.gateway->quote                            },
           {     "symbol", K.gateway->symbol                           },
           {     "margin", K.gateway->margin                           },
-          {  "webMarket", K.gateway->webMarket                        },
-          {  "webOrders", K.gateway->webOrders                        },
+          {  "webMarket", K.gateway->web()                            },
+          {  "webOrders", K.gateway->web(true)                        },
           {  "tickPrice", K.gateway->decimal.price.stream.precision() },
           {   "tickSize", K.gateway->decimal.amount.stream.precision()},
           {  "stepPrice", K.gateway->decimal.price.step               },
@@ -294,7 +365,7 @@ namespace analpaper {
     public:
       Engine(const KryptoNinja &bot)
         : portfolios(bot)
-        , ticker(portfolios)
+        , ticker(bot, portfolios)
         , wallet(portfolios)
         , broker(bot)
       {};
