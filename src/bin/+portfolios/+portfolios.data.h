@@ -118,9 +118,14 @@ namespace analpaper {
   };
 
   struct Market {
-    string web;
+    string web,
+           base,
+           quote,
+           symbol;
      Price spread,
-           raw_spread;
+           raw_spread,
+           ask,
+           bid;
     double open;
     Amount volume,
            raw_volume;
@@ -128,7 +133,12 @@ namespace analpaper {
   static void to_json(json &j, const Market &k) {
     j = {
       {   "web", k.web   },
+      {  "base", k.base  },
+      { "quote", k.quote },
+      {"symbol", k.symbol},
       {"spread", k.spread},
+      {   "ask", k.ask   },
+      {   "bid", k.bid   },
       {  "open", k.open  },
       {"volume", k.volume}
     };
@@ -146,8 +156,13 @@ namespace analpaper {
       void add(const Ticker &raw) {
         market[raw.base][raw.quote] = {
           K.gateway->web(raw.base, raw.quote),
+          raw.base,
+          raw.quote,
+          raw.symbol,
           0,
           raw.spread,
+          raw.bestask,
+          raw.bestbid,
           raw.open,
           0,
           raw.volume
@@ -226,6 +241,35 @@ namespace analpaper {
         portfolios.portfolio[raw.currency].wallet = raw;
         portfolios.calc();
       };
+  };
+
+  struct Orders: public System::Orderbook,
+                 public Client::Broadcast<Orders> {
+    private_ref:
+      const KryptoNinja &K;
+    public:
+      Orders(const KryptoNinja &bot)
+        : Orderbook(bot)
+        , Broadcast(bot)
+        , K(bot)
+      {
+        withExternal = true;
+      };
+      void read_from_gw(const Order &) {
+        broadcast();
+      };
+      mMatter about() const override {
+        return mMatter::OrderStatusReports;
+      };
+      bool realtime() const override {
+        return false;
+      };
+      json blob() const override {
+        return working(false);
+      };
+  };
+  static void to_json(json &j, const Orders &k) {
+    j = k.blob();
   };
 
   struct Semaphore: public Client::Broadcast<Semaphore>,
@@ -331,14 +375,41 @@ namespace analpaper {
     j = k.to_json();
   };
 
-  struct Broker {
+  struct ButtonCancelOrder: public Client::Clickable {
+    private_ref:
+      const KryptoNinja &K;
+    public:
+      ButtonCancelOrder(const KryptoNinja &bot)
+        : Clickable(bot)
+        , K(bot)
+      {};
+      void click(const json &j) override {
+        if ((j.is_object() and !j.value("orderId", "").empty()))
+          K.clicked(this, j.at("orderId").get<string>());
+      };
+      mMatter about() const override {
+        return mMatter::CancelOrder;
+      };
+  };
+
+  struct Buttons {
+    ButtonCancelOrder          cancel;
+    Buttons(const KryptoNinja &bot)
+      : cancel(bot)
+    {};
+  };
+
+  struct Broker: public Client::Clicked {
           Memory memory;
        Semaphore semaphore;
     private_ref:
       const KryptoNinja &K;
     public:
-      Broker(const KryptoNinja &bot)
-        : memory(bot)
+      Broker(const KryptoNinja &bot, const Buttons &b)
+        : Clicked(bot, {
+            {&b.cancel, [&](const json &j) { K.cancel(j); }}
+          })
+        , memory(bot)
         , semaphore(bot)
         , K(bot)
       {};
@@ -352,13 +423,17 @@ namespace analpaper {
       Portfolios portfolios;
          Tickers ticker;
          Wallets wallet;
+         Buttons button;
+          Orders orders;
           Broker broker;
     public:
       Engine(const KryptoNinja &bot)
         : portfolios(bot)
         , ticker(bot, portfolios)
         , wallet(portfolios)
-        , broker(bot)
+        , button(bot)
+        , orders(bot)
+        , broker(bot, button)
       {};
       void read(const Connectivity &rawdata) {
         broker.semaphore.read_from_gw(rawdata);
@@ -368,6 +443,9 @@ namespace analpaper {
       };
       void read(const Wallet &rawdata) {
         wallet.read_from_gw(rawdata);
+      };
+      void read(const Order &rawdata) {
+        orders.read_from_gw(rawdata);
       };
       void timer_1s(const unsigned int &tick) {
         if (!(tick % 60))

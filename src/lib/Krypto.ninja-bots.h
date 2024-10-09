@@ -8,7 +8,7 @@ namespace ₿ {
   //! \param[in] reason Allows any (colorful?) string.
   static void exit(const string &reason = "") {
     epilogue = reason + string(!(reason.empty() or reason.back() == '.'), '.');
-    raise(SIGQUIT);
+    raise(SIGBREAK);
   };
 
   //! \brief     Call all endingFn once and print a last error log msg.
@@ -17,8 +17,6 @@ namespace ₿ {
   static void error(const string &prefix, const string &reason) {
     exit(prefix + ANSI_PUKE_RED + " Errrror: " + ANSI_HIGH_RED + reason);
   };
-
-  static mutex lock;
 
   class Rollout {
     public:
@@ -33,7 +31,7 @@ namespace ₿ {
 #ifndef NDEBUG
           json::object();
 #else
-          Curl::Web::xfer(lock, "https://api.github.com/repos/ctubio/"
+          Curl::Web::xfer("https://api.github.com/repos/ctubio/"
             "Krypto-trading-bot/compare/" K_HEAD "...HEAD");
 #endif
         if (diff.value("ahead_by", 0)
@@ -72,9 +70,9 @@ namespace ₿ {
         ::signal(SIGPIPE,  SIG_IGN);
         ::signal(SIGINT, [](const int) {
           clog << ANSI_NEW_LINE;
-          raise(SIGQUIT);
+          raise(SIGBREAK);
         });
-        ::signal(SIGQUIT,  die);
+        ::signal(SIGBREAK, die);
         ::signal(SIGTERM,  err);
         ::signal(SIGABRT,  wtf);
         ::signal(SIGSEGV,  wtf);
@@ -103,7 +101,7 @@ namespace ₿ {
       static void die(const int) {
         if (epilogue.empty())
           epilogue = "Excellent decision! "
-                   + Curl::Web::xfer(lock, "https://api.chucknorris.io/jokes/random?category=dev")
+                   + Curl::Web::xfer("https://api.chucknorris.io/jokes/random?category=dev")
                        .value("value", "let's plant a tree instead..");
         halt(
           epilogue.find("Errrror") == string::npos
@@ -120,12 +118,13 @@ namespace ₿ {
         const string mods = changelog();
         if (mods.empty()) {
           epilogue += "(Three-Headed Monkey found):" ANSI_NEW_LINE + epitaph
-            + "- binbuild: " K_SOURCE " " K_CHOST   ANSI_NEW_LINE
-              "- lastbeat: " + to_string(Tspent)  + ANSI_NEW_LINE
+            + "- binbuild: " K_SOURCE " " K_CHOST    ANSI_NEW_LINE
+            + "- numpatch: " K_BUILD                 ANSI_NEW_LINE
+              "- lastbeat: " + to_string(Tspent)   + ANSI_NEW_LINE
 #ifndef _WIN32
-            + "- tracelog: " ANSI_NEW_LINE;
+            + "- tracelog: "                         ANSI_NEW_LINE;
           void *k[69];
-          size_t jumps = backtrace(k, 69);
+          size_t jumps = backtrace(k, sizeof(k) / sizeof(void*));
           char **trace = backtrace_symbols(k, jumps);
           for (;
             jumps --> 0;
@@ -269,7 +268,7 @@ namespace ₿ {
       };
     private:
       string lines(string reason) const {
-        string::size_type n = 0;
+        size_t n = 0;
         while ((n = reason.find(ANSI_NEW_LINE, n + 2)) != string::npos)
           reason.insert(n + 2, ANSI_HIGH_RED);
         return ANSI_HIGH_RED + reason;
@@ -283,7 +282,7 @@ namespace ₿ {
           clog << puke;
 #endif
         if (display.terminal) {
-          string::size_type n = 0;
+          size_t n = 0;
           while ((n = puke.find(ANSI_NEW_LINE)) != string::npos) {
             clogs.emplace_back(puke.begin(), puke.begin() + n);
             puke.erase(0, n + 2);
@@ -304,7 +303,7 @@ namespace ₿ {
           << setw(3) << microseconds.count();
         time_t tt = chrono::system_clock::to_time_t(clock);
         char datetime[15];
-        strftime(datetime, 15, "%m/%d %H:%M:%S", localtime(&tt));
+        strftime(datetime, sizeof(datetime), "%m/%d %H:%M:%S", localtime(&tt));
         return                  ANSI_HIGH_GREEN +
               datetime        + ANSI_PUKE_GREEN +
               microtime.str() + ANSI_HIGH_WHITE +
@@ -503,7 +502,7 @@ namespace ₿ {
         args["base"]  = arg<string>("currency").substr(0, arg<string>("currency").find("/"));
         args["quote"] = arg<string>("currency").substr(1+ arg<string>("currency").find("/"));
         if (arg<string>("secret").find("EC PRIVATE KEY") != string::npos and arg<string>("secret").find(ANSI_NEW_LINE) == string::npos) {
-          string::size_type n = 0;
+          size_t n = 0;
           while ((n = arg<string>("secret").find("\\r", n)) != string::npos)
             args["secret"] = string(arg<string>("secret")).erase(n, 2);
           n = 0;
@@ -553,17 +552,20 @@ namespace ₿ {
         if (!arg<string>("interface").empty() and !arg<int>("ipv6"))
           args_easy_setopt = [inet = arg<string>("interface")](CURL *curl) {
             curl_easy_setopt(curl, CURLOPT_USERAGENT, "K");
+            curl_easy_setopt_nowin32(curl, CURLOPT_CAINFO_BLOB, &curl_ca_embed_blob);
             curl_easy_setopt(curl, CURLOPT_INTERFACE, inet.data());
             curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
           };
         else if (!arg<string>("interface").empty())
           args_easy_setopt = [inet = arg<string>("interface")](CURL *curl) {
             curl_easy_setopt(curl, CURLOPT_USERAGENT, "K");
+            curl_easy_setopt_nowin32(curl, CURLOPT_CAINFO_BLOB, &curl_ca_embed_blob);
             curl_easy_setopt(curl, CURLOPT_INTERFACE, inet.data());
           };
         else if (!arg<int>("ipv6"))
           args_easy_setopt = [](CURL *curl) {
             curl_easy_setopt(curl, CURLOPT_USERAGENT, "K");
+            curl_easy_setopt_nowin32(curl, CURLOPT_CAINFO_BLOB, &curl_ca_embed_blob);
             curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
           };
       };
@@ -598,7 +600,7 @@ namespace ₿ {
               << it.name
               << string((11 - it.name.length()) / 2, ' ') << " █▓▒░";
           else {
-            string::size_type n = 0;
+            size_t n = 0;
             while ((n = usage.find(ANSI_NEW_LINE, n + 2)) != string::npos)
               usage.insert(n + 2, 28, ' ');
             const string example = "--" + it.name + (it.default_value ? "=" + it.defined_value : "");
@@ -635,7 +637,7 @@ namespace ₿ {
     private:
       Loop::Async::Event<char> keylogger;
       mutable unordered_map<char, function<void()>> maps = {
-        { (char)SIGQUIT, []() { raise(SIGQUIT); } }
+        { (char)SIGBREAK, []() { raise(SIGBREAK); } }
       };
     protected:
       void wait_for_keylog(Loop *const loop) {
@@ -643,7 +645,7 @@ namespace ₿ {
           error("SH", string("Unable to launch another \"keylogger\" thread"));
         keylogger.callback([&](const char &ch) { keylog(ch); });
         keylogger.wait_for(loop, [&]() { return sync_keylogger(); });
-        keylogger.ask_for();
+        keylogger.ask_for(false);
       };
     private:
       void keymap(const char &ch, function<void()> fn) const {
@@ -654,7 +656,7 @@ namespace ₿ {
       void keylog(const char &ch) {
         if (maps.contains(ch))
           maps.at(ch)();
-        keylogger.ask_for();
+        keylogger.ask_for(false);
       };
       vector<char> sync_keylogger() {
         int ch =
@@ -797,23 +799,36 @@ namespace ₿ {
     public:
       function<unsigned int()> dbSize = [](){ return 0; };
     private:
-      sqlite3 *db = nullptr;
-      string disk = "main";
+      unique_ptr<
+        sqlite3, decltype(&sqlite3_close)
+      >                       db;
+                       string disk = "main";
       mutable vector<Backup*> tables;
+    public:
+      Sqlite()
+        : db(nullptr, sqlite3_close)
+      {};
     protected:
       void backups(const Option *const K) {
         if (blackhole()) return;
-        if (K->arg<string>("database") != ":memory:")
+        if (K->arg<string>("database") != ":memory:") {
+          if (!Files::mkdirs(K->arg<string>("database")))
+            error("CF", "Can't write into " + K->arg<string>("database") + ", please create the parent directory or change the permissions manually before try again.");
           dbSize = [K](){
             struct stat st;
             return stat(K->arg<string>("database").data(), &st) ? 0 : st.st_size;
           };
-        if (sqlite3_open(K->arg<string>("database").data(), &db))
-          error("DB", sqlite3_errmsg(db));
+        }
+        sqlite3 *_db = nullptr;
+        if (sqlite3_open(K->arg<string>("database").data(), &_db))
+          error("DB", sqlite3_errmsg(_db));
+        db.reset(_db);
         K->log("DB", "loaded OK from", K->arg<string>("database"));
         if (!K->arg<string>("diskdata").empty()) {
+          if (!Files::mkdirs(K->arg<string>("diskdata")))
+            error("CF", "Can't write into " + K->arg<string>("diskdata") + ", please create the parent directory or change the permissions manually before try again.");
           exec("ATTACH '" + K->arg<string>("diskdata") + "' AS " + (disk = "disk") + ";");
-            K->log("DB", "loaded OK from", K->arg<string>("diskdata"));
+          K->log("DB", "loaded OK from", K->arg<string>("diskdata"));
         }
         exec("PRAGMA " + disk + ".journal_mode = WAL;"
              "PRAGMA " + disk + ".synchronous = NORMAL;");
@@ -885,10 +900,8 @@ namespace ₿ {
           : "";
       };
       void exec(const string &sql, json *const result = nullptr) {
-        char* zErrMsg = nullptr;
-        sqlite3_exec(db, sql.data(), result ? write : nullptr, (void*)result, &zErrMsg);
-        if (zErrMsg) error("DB", "SQLite error: " + (zErrMsg + (" at " + sql)));
-        sqlite3_free(zErrMsg);
+        if (SQLITE_OK != sqlite3_exec(db.get(), sql.data(), result ? write : nullptr, (void*)result, nullptr))
+          error("DB", "SQLite error: " + (sqlite3_errmsg(db.get()) + (" at " + sql)));
       };
       static int write(void *result, int argc, char **argv, char**) {
         for (int i = 0; i < argc; ++i)
@@ -1331,6 +1344,8 @@ namespace ₿ {
               };
           } zombies;
           Order *last = nullptr;
+        protected:
+          bool withExternal = false;
         private:
           unordered_map<string, Order> orders;
         private_ref:
@@ -1432,7 +1447,14 @@ namespace ₿ {
               if (it != orders.end())
                 return &it->second;
             }
-            return find(raw.orderId);
+            Order *found = find(raw.orderId);
+            if (!found and withExternal and raw.status == Status::Working) {
+              Order external = raw;
+              external.status  = Status::Waiting;
+              external.latency = -1;
+              found = findsert(external);
+            }
+            return found;
           };
       };
     public:
@@ -1479,7 +1501,7 @@ namespace ₿ {
 #endif
       };
     protected:
-      void required_setup(const Option *const K, mutex &lock, const curl_socket_t &loopfd) {
+      void required_setup(const Option *const K, const curl_socket_t &loopfd) {
         if (!(gateway = Gw::new_Gw(K->arg<string>("exchange"))))
           error("CF",
             "Unable to configure a valid gateway using --exchange="
@@ -1503,7 +1525,6 @@ namespace ₿ {
         gateway->apikeyid  = K->arg<string>("apikeyid");
         gateway->maxLevel  = K->arg<int>("market-limit");
         gateway->debug     = K->arg<int>("debug-secret");
-        gateway->guard     = &lock;
         gateway->loopfd    = loopfd;
         gateway->printer   = [K](const string &prefix, const string &reason, const string &highlight) {
           if (reason.find("Error") != string::npos)
@@ -1571,13 +1592,13 @@ namespace ₿ {
         {
           ending([&]() { with_goodbye(); });
           optional_setup(argc, argv, proactive(), blackhole(), unmounted());
-          required_setup(this, lock, poll());
+          required_setup(this, poll());
         } {
           if (windowed())
             wait_for_keylog(this);
         } {
           log("CF", "Outbound IP address is",
-            wtfismyip = Curl::Web::xfer(lock, "https://wtfismyip.com/json")
+            wtfismyip = Curl::Web::xfer("https://wtfismyip.com/json")
                           .value("YourFuckingIPAddress", wtfismyip)
           );
         } {

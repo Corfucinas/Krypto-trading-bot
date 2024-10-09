@@ -13,8 +13,6 @@
 #include <list>
 #include <ctime>
 #include <cmath>
-#include <mutex>
-#include <thread>
 #include <future>
 #include <chrono>
 #include <random>
@@ -29,12 +27,11 @@
 #include <unistd.h>
 
 #ifdef  _WIN32
-#undef  _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
 #include <winsock2.h>
 #include <windows.h>
 #include <conio.h>
 #else
+#define SIGBREAK SIGQUIT
 #include <termios.h>
 #include <execinfo.h>
 #include <sys/ioctl.h>
@@ -61,6 +58,7 @@
 #include <sqlite3.h>
 
 #include <curl/curl.h>
+#include <curl/cacert_embed.h>
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>

@@ -26,9 +26,40 @@ you can fund liquidity pools of automated market makers at [tinyman.org](https:/
 
 Our bots run on unix-like systems. Persistence is achieved through a built-in server-less SQLite C++ interface.<br>Data transfers are directly done from your machine to the exchange using the latest CURL and OpenSSL versions.<br>Installation in a dedicated [Debian](https://cdimage.debian.org/cdimage/release/current/), [Raspberry](https://www.raspberrypi.com/software/), [Red Hat](https://developers.redhat.com/products/rhel/download), [CentOS](https://www.centos.org/download/) or macOS instance without Docker is recommended.
 
-![Web UI Preview](https://user-images.githubusercontent.com/1634027/44740469-d5c7ff00-aafa-11e8-9252-73b9c1283adb.png)
+The web UI is compatible with most web browsers/resolutions, but Brave or Firefox at 1600px are recommended.<br />Doesn't require configuration of any web server (unless installed behind your own reverse proxy).
 
-The web UI is compatible with most web browsers/resolutions, but Brave or Firefox at 1600px are recommended. Doesn't require configuration of any web server (unless installed behind your own reverse proxy).
+<details><summary><b>K-trading-bot</b> <sup>(web UI + CLI)</sup></summary>
+to control a fully configurable high frequency trading engine, with all features suggested by the community:<br />
+
+![trading-bot UI Preview](https://user-images.githubusercontent.com/1634027/44740469-d5c7ff00-aafa-11e8-9252-73b9c1283adb.png)
+</details>
+
+<details><summary><b>K-+portfolios</b> <sup>(web UI + CLI)</sup></summary>
+to show all balances and orders from one exchange, with buttons to cancel orders and links to go to markets:<br />
+
+![+portfolios UI Preview](https://github.com/user-attachments/assets/3dd3488a-a466-4817-89f7-a6d581ddac9e)
+</details>
+
+<details><summary><b>K-hello-world</b> <sup>(CLI)</sup></summary>
+to print the current value of a given currency to stdout:<br />
+
+<pre>
+ _________________________________________
+/ Hello, WORLD!                           \
+|                                         |
+\ pssst.. 1.00000000 BTC = 56683.49 EUR.  /
+ -----------------------------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
+</pre>
+</details>
+
+<details><summary><b>K-scaling-bot, K-stable--bot</b> <sup>(CLI)</sup></summary>
+to easy mod and start developing a new custom bot.
+</details>
 
 ### Compatible Exchanges
 

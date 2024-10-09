@@ -66,9 +66,8 @@ namespace ₿ {
   };
 
   class FixFrames {
-    protected:
-      const string  target;
     private_ref:
+      const string &target;
       const string &sender;
     public:
       FixFrames(const string &t, const string &s)
@@ -181,8 +180,14 @@ namespace ₿ {
                     for (const T &it : data.get()) try_write(it);
                 });
               };
-              void ask_for() {
-                if (!data.valid())
+              void ask_for(const bool &samethread = true) {
+                if (data.valid()) return;
+                if (samethread) {
+                  Wakeup again(event);
+                  data = ::async(launch::deferred, [&]() {
+                    return job();
+                  });
+                } else
                   data = ::async(launch::async, [&]() {
                     Wakeup again(event);
                     return job();
@@ -439,8 +444,15 @@ namespace ₿ {
   };
 #endif
 
+  static struct curl_blob curl_ca_embed_blob = {
+    (void*)curl_ca_embed,
+    strlen((const char*)curl_ca_embed),
+    CURL_BLOB_NOCOPY
+  };
+
   static function<void(CURL*)> args_easy_setopt = [](CURL *curl) {
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "K");
+    curl_easy_setopt_nowin32(curl, CURLOPT_CAINFO_BLOB, &curl_ca_embed_blob);
   };
 
   class Curl {
@@ -450,19 +462,16 @@ namespace ₿ {
           string in;
         private:
           string out;
-          CURL *curl = nullptr;
-        private_ref:
-          mutex *const &lock;
+          unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl;
         public:
-          Easy(mutex *const &l)
-            : lock(l)
+          Easy()
+            : curl(nullptr, curl_easy_cleanup)
           {};
         protected:
           void cleanup() {
             if (curl) {
               if (!out.empty()) send();
-              curl_easy_cleanup(curl);
-              curl = nullptr;
+              curl.reset();
               stop();
             }
           };
@@ -470,17 +479,16 @@ namespace ₿ {
             return sockfd;
           };
           CURLcode connect(const string &url, const string &header, const string &res1, const string &res2) {
-            lock_guard<mutex> guard(*lock);
             out = header;
             in.clear();
             CURLcode rc;
             if (CURLE_OK == (rc = init())) {
-              args_easy_setopt(curl);
-              curl_easy_setopt(curl, CURLOPT_URL, url.data());
-              curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-              curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1L);
-              if ( CURLE_OK != (rc = curl_easy_perform(curl))
-                or CURLE_OK != (rc = curl_easy_getinfo(curl, CURLINFO_ACTIVESOCKET, &sockfd))
+              args_easy_setopt(curl.get());
+              curl_easy_setopt(curl.get(), CURLOPT_URL, url.data());
+              curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+              curl_easy_setopt(curl.get(), CURLOPT_CONNECT_ONLY, 1L);
+              if ( CURLE_OK != (rc = curl_easy_perform(curl.get()))
+                or CURLE_OK != (rc = curl_easy_getinfo(curl.get(), CURLINFO_ACTIVESOCKET, &sockfd))
                 or CURLE_OK != (rc = send())
                 or CURLE_OK != (rc = recv(5))
                 or string::npos == in.find(res1)
@@ -497,7 +505,6 @@ namespace ₿ {
             return rc;
           };
           CURLcode send_recv() {
-            lock_guard<mutex> guard(*lock);
             CURLcode rc = CURLE_COULDNT_CONNECT;
             if (curl
               and sockfd
@@ -509,7 +516,6 @@ namespace ₿ {
             return rc;
           };
           CURLcode emit(const string &data) {
-            lock_guard<mutex> guard(*lock);
             CURLcode rc = CURLE_OK;
             if (curl and sockfd) {
               out += data;
@@ -523,8 +529,8 @@ namespace ₿ {
           };
         private:
           CURLcode init() {
-            if (!curl) curl = curl_easy_init();
-            else curl_easy_reset(curl);
+            if (!curl) curl.reset(curl_easy_init());
+            else curl_easy_reset(curl.get());
             sockfd = 0;
             return curl
               ? CURLE_OK
@@ -535,7 +541,7 @@ namespace ₿ {
             do {
               do {
                 size_t n = 0;
-                rc = curl_easy_send(curl, out.data(), out.length(), &n);
+                rc = curl_easy_send(curl.get(), out.data(), out.length(), &n);
                 out = out.substr(n);
                 if (rc == CURLE_AGAIN and !wait(false, 5))
                   return CURLE_OPERATION_TIMEDOUT;
@@ -552,12 +558,16 @@ namespace ₿ {
               size_t n;
               do {
                 n = 0;
-                rc = curl_easy_recv(curl, data, sizeof(data), &n);
+                rc = curl_easy_recv(curl.get(), data, sizeof(data), &n);
+#ifdef _WIN32
+                if (rc == CURLE_UNSUPPORTED_PROTOCOL and n == 0)
+                  rc = CURLE_OK;
+#endif
                 in.append(data, n);
                 if (rc == CURLE_AGAIN and !wait(true, timeout))
                   return CURLE_OPERATION_TIMEDOUT;
               } while (rc == CURLE_AGAIN);
-              if ((timeout and in.find(ANSI_NEW_LINE ANSI_NEW_LINE) != in.find("\u0001" "10="))
+              if ((timeout and in.find(ANSI_NEW_LINE ANSI_NEW_LINE) != string::npos)
                 or rc != CURLE_OK
                 or n == 0
               ) break;
@@ -578,41 +588,35 @@ namespace ₿ {
       class Web {
         public:
           static json xfer(
-                  mutex          &lock,
             const string         &url,
             const string         &crud = "GET",
             const string         &post = "",
             const vector<string> &headers = {},
             const string         &auth = ""
           ) {
-            lock_guard<mutex> guard(lock);
             string reply;
             CURLcode rc = CURLE_FAILED_INIT;
-            CURL *curl = curl_easy_init();
+            unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(
+              curl_easy_init(),
+              curl_easy_cleanup
+            );
             if (curl) {
-              args_easy_setopt(curl);
-              struct curl_slist *slist = nullptr;
-              for (const auto &it : headers) {
-                struct curl_slist *tmp = curl_slist_append(slist, it.data());
-                if (tmp) slist = tmp;
-                else if (slist) {
-                  curl_slist_free_all(slist);
-                  slist = nullptr;
-                  break;
-                }
-              }
-              if (slist) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, slist);
-              if (!post.empty()) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post.data());
-              if (!auth.empty()) curl_easy_setopt(curl, CURLOPT_USERPWD, auth.data());
-              curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, crud.data());
-              curl_easy_setopt(curl, CURLOPT_URL, url.data());
-              curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &write);
-              curl_easy_setopt(curl, CURLOPT_WRITEDATA, &reply);
-              curl_easy_setopt(curl, CURLOPT_TIMEOUT, 21L);
-              // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
-              rc = curl_easy_perform(curl);
-              curl_easy_cleanup(curl);
-              if (slist) curl_slist_free_all(slist);
+              args_easy_setopt(curl.get());
+              unique_ptr<struct curl_slist, decltype(&curl_slist_free_all)> slist(
+                nullptr,
+                curl_slist_free_all
+              );
+              for (const auto &it : headers)
+                slist.reset(curl_slist_append(slist.release(), it.data()));
+              if (slist) curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, slist.get());
+              if (!post.empty()) curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, post.data());
+              if (!auth.empty()) curl_easy_setopt(curl.get(), CURLOPT_USERPWD, auth.data());
+              curl_easy_setopt(curl.get(), CURLOPT_CUSTOMREQUEST, crud.data());
+              curl_easy_setopt(curl.get(), CURLOPT_URL, url.data());
+              curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, &write);
+              curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &reply);
+              curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 21L);
+              rc = curl_easy_perform(curl.get());
             }
             return rc == CURLE_OK
               ? (json::accept(reply)
@@ -629,31 +633,30 @@ namespace ₿ {
       };
       class WebSocket: public Easy,
                        public WebSocketFrames {
-        public:
-          WebSocket(mutex *const &l)
-            : Easy(l)
-          {};
         private:
           using Easy::in;
         protected:
           CURLcode connect(const string &uri) {
             CURLcode rc = CURLE_URL_MALFORMAT;
-            CURLU *url = curl_url();
+            unique_ptr<CURLU, decltype(&curl_url_cleanup)> url(
+              curl_url(),
+              curl_url_cleanup
+            );
             char *host,
                  *port,
                  *path,
                  *query;
             string header;
-            if (!curl_url_set(url, CURLUPART_URL, ("http" + uri.substr(2)).data(), 0)) {
-              if (!curl_url_get(url, CURLUPART_HOST, &host, 0)) {
+            if (!curl_url_set(url.get(), CURLUPART_URL, ("http" + uri.substr(2)).data(), 0)) {
+              if (!curl_url_get(url.get(), CURLUPART_HOST, &host, 0)) {
                 header = string(host);
                 curl_free(host);
-                if (!curl_url_get(url, CURLUPART_PORT, &port, CURLU_DEFAULT_PORT)) {
+                if (!curl_url_get(url.get(), CURLUPART_PORT, &port, CURLU_DEFAULT_PORT)) {
                   header += ":" + string(port);
                   curl_free(port);
-                  if (!curl_url_get(url, CURLUPART_PATH, &path, 0)) {
+                  if (!curl_url_get(url.get(), CURLUPART_PATH, &path, 0)) {
                     header = "GET " + string(path) + (
-                                curl_url_get(url, CURLUPART_QUERY, &query, 0)
+                                curl_url_get(url.get(), CURLUPART_QUERY, &query, 0)
                                   ? "" : "?" + string(query)
                              ) + " HTTP/1.1"
                              ANSI_NEW_LINE "Host: " + header +
@@ -669,7 +672,6 @@ namespace ₿ {
                   }
                 }
               }
-              curl_url_cleanup(url);
             }
             return rc == CURLE_OK
               ? Easy::connect(
@@ -693,10 +695,6 @@ namespace ₿ {
           };
       };
       class WebSocketTwin: public WebSocket {
-        public:
-          WebSocketTwin(mutex *const &l)
-            : WebSocket(l)
-          {};
         protected:
           virtual string twin(const string&) const = 0;
       };
@@ -706,9 +704,8 @@ namespace ₿ {
           using Easy::in;
           unsigned long sequence = 0;
         public:
-          FixSocket(const string &t, const string &s, mutex *const &l)
-            : Easy(l)
-            , FixFrames(t, s)
+          FixSocket(const string &t, const string &s)
+            : FixFrames(t, s)
           {};
         protected:
           CURLcode connect(const string &uri, const string &logon) {
@@ -752,25 +749,23 @@ namespace ₿ {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wrestrict"
       static string B64(const string &input, const bool &urlsafe = false) {
-        BIO *bio, *b64;
-        BUF_MEM *bufferPtr;
-        b64 = BIO_new(BIO_f_base64());
-        bio = BIO_new(BIO_s_mem());
-        bio = BIO_push(b64, bio);
-        if (BIO_set_close(bio, BIO_CLOSE)) {}
-        BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-        BIO_write(bio, input.data(), input.length());
-        if (BIO_flush(bio)) {}
-        BIO_get_mem_ptr(bio, &bufferPtr);
-        string output(bufferPtr->data, bufferPtr->length);
-        BIO_free_all(bio);
+        unique_ptr<BIO, decltype(&BIO_free_all)> bio(
+          BIO_push(BIO_new(BIO_f_base64()), BIO_new(BIO_s_mem())),
+          BIO_free_all
+        );
+        if (BIO_set_close(bio.get(), BIO_CLOSE)) {}
+        BIO_set_flags(bio.get(), BIO_FLAGS_BASE64_NO_NL);
+        BIO_write(bio.get(), input.data(), input.length());
+        if (BIO_flush(bio.get())) {}
+        BUF_MEM *buf = nullptr;
+        BIO_get_mem_ptr(bio.get(), &buf);
+        string output(buf->data, buf->length);
         if (urlsafe) {
-          string::size_type n = 0;
-          while ((n = output.find("+", n)) != string::npos)
-            output.replace(n++, 1, "-");
-          n = 0;
-          while ((n = output.find("/", n)) != string::npos)
-            output.replace(n++, 1, "_");
+          size_t n = 0;
+          while ((n = output.find("+")) != string::npos)
+            output.replace(n, 1, "-");
+          while ((n = output.find("/")) != string::npos)
+            output.replace(n, 1, "_");
           while (output.back() == '=')
             output.erase(output.length() - 1);
         }
@@ -779,24 +774,22 @@ namespace ₿ {
       static string B64_decode(const string &input, const bool &urlsafe = false) {
         if (urlsafe) {
           string output = input;
-          string::size_type n = 0;
-          while ((n = output.find("-", n)) != string::npos)
-            output.replace(n++, 1, "+");
-          n = 0;
-          while ((n = output.find("_", n)) != string::npos)
-            output.replace(n++, 1, "/");
+          size_t n = 0;
+          while ((n = output.find("-")) != string::npos)
+            output.replace(n, 1, "+");
+          while ((n = output.find("_")) != string::npos)
+            output.replace(n, 1, "/");
           output += string(4 - (output.length() % 4), '=');
           return B64_decode(output + string(4 - (output.length() % 4), '='));
         }
-        BIO *bio, *b64;
+        unique_ptr<BIO, decltype(&BIO_free_all)> bio(
+          BIO_push(BIO_new(BIO_f_base64()), BIO_new_mem_buf(input.data(), input.length())),
+          BIO_free_all
+        );
         char out[input.length()];
-        b64 = BIO_new(BIO_f_base64());
-        bio = BIO_new_mem_buf(input.data(), input.length());
-        bio = BIO_push(b64, bio);
-        if (BIO_set_close(bio, BIO_CLOSE)) {}
-        BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-        int len = BIO_read(bio, out, input.length());
-        BIO_free_all(bio);
+        if (BIO_set_close(bio.get(), BIO_CLOSE)) {}
+        BIO_set_flags(bio.get(), BIO_FLAGS_BASE64_NO_NL);
+        int len = BIO_read(bio.get(), out, input.length());
         return string(out, len);
       };
 #pragma GCC diagnostic pop 
@@ -893,26 +886,28 @@ namespace ₿ {
       class Frontend: public Socket,
                       public WebSocketFrames {
         private:
-                    SSL *ssl     = nullptr;
+          unique_ptr<
+            SSL, function<void(SSL*)>
+          >              ssl;
           const Session *session = nullptr;
                   Clock  time    = 0;
-                 string  addr,
+                string   addr,
                          out,
                          in;
         public:
           Frontend(const curl_socket_t &s, const curl_socket_t &loopfd, SSL *S, const Session *e)
             : Socket(s)
-            , ssl(S)
+            , ssl(S, [](SSL *ssl){ 
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+              })
             , session(e)
             , time(Tstamp)
           {
             Socket::start(loopfd, ioHttp);
           };
           void shutdown() {
-            if (ssl) {
-              SSL_shutdown(ssl);
-              SSL_free(ssl);
-            }
+            ssl.reset();
             Socket::shutdown();
             if (!time) session->upgrade(-1, addr);
           };
@@ -956,14 +951,15 @@ namespace ₿ {
             ) {
               if (addr.empty())
                 addr = address();
+              const string iN     = Text::strU(in);
               const string path   = in.substr(4, in.find(" HTTP/") - 4);
-              const size_t papers = in.find("Authorization: Basic ");
+              const size_t papers = iN.find("AUTHORIZATION: BASIC ");
               string auth;
               if (papers != string::npos) {
                 auth = in.substr(papers + 21);
                 auth = auth.substr(0, auth.find(ANSI_NEW_LINE));
               }
-              const size_t key = in.find("Sec-WebSocket-Key: ");
+              const size_t key = iN.find("SEC-WEBSOCKET-KEY: ");
               int allowed = 1;
               if (key == string::npos) {
                 out = session->response(path, auth, addr);
@@ -971,10 +967,10 @@ namespace ₿ {
                   shutdown();
                 else change(EPOLLIN | EPOLLOUT);
               } else if ((session->auth.empty() or auth == session->auth)
-                and in.find(ANSI_NEW_LINE "Upgrade: websocket" ANSI_NEW_LINE) != string::npos
-                and in.find(ANSI_NEW_LINE "Connection: ")                     != string::npos
-                and in.find(" Upgrade")                                       != string::npos
-                and in.find("Sec-WebSocket-Version: 13" ANSI_NEW_LINE)        != string::npos
+                and iN.find(ANSI_NEW_LINE "UPGRADE: WEBSOCKET") != string::npos
+                and iN.find(ANSI_NEW_LINE "CONNECTION: ")       != string::npos
+                and iN.find(" UPGRADE")                         != string::npos
+                and (iN.find("SEC-WEBSOCKET-VERSION: 13")       != string::npos)
                 and (allowed = session->upgrade(allowed, addr))
               ) {
                 time = 0;
@@ -1023,8 +1019,8 @@ namespace ₿ {
             if (ssl) {
               if (!out.empty()) {
                 cork(1);
-                int n = SSL_write(ssl, out.data(), out.length());
-                switch (SSL_get_error(ssl, n)) {
+                int n = SSL_write(ssl.get(), out.data(), out.length());
+                switch (SSL_get_error(ssl.get(), n)) {
                   case SSL_ERROR_WANT_READ:
                   case SSL_ERROR_WANT_WRITE:  break;
                   case SSL_ERROR_NONE:        out.clear();
@@ -1037,8 +1033,8 @@ namespace ₿ {
               }
               do {
                 char data[1024];
-                int n = SSL_read(ssl, data, sizeof(data));
-                switch (SSL_get_error(ssl, n)) {
+                int n = SSL_read(ssl.get(), data, sizeof(data));
+                switch (SSL_get_error(ssl.get(), n)) {
                   case SSL_ERROR_NONE:        in.append(data, n);
                   case SSL_ERROR_WANT_READ:
                   case SSL_ERROR_WANT_WRITE:
@@ -1047,7 +1043,7 @@ namespace ₿ {
                                               shutdown();
                                               return;
                 }
-              } while (SSL_pending(ssl));
+              } while (SSL_pending(ssl.get()));
             } else {
               if (!out.empty()) {
                 cork(1);
@@ -1076,10 +1072,15 @@ namespace ₿ {
       class Backend: public Socket,
                      public WebSocketFrames {
         private:
-                 SSL_CTX *ctx = nullptr;
-                 Session  session;
-          list<Frontend>  requests;
+          unique_ptr<
+            SSL_CTX, decltype(&SSL_CTX_free)
+          >              ctx;
+                 Session session;
+          list<Frontend> requests;
         public:
+          Backend()
+            : ctx(nullptr, SSL_CTX_free)
+          {};
           bool idle() const {
             return !any_of(requests.begin(), requests.end(), [](auto &it) {
               return it.upgraded();
@@ -1106,6 +1107,7 @@ namespace ₿ {
               requests.back().shutdown();
               requests.pop_back();
             }
+            ctx.reset();
             shutdown();
           };
           void timeouts() {
@@ -1152,62 +1154,95 @@ namespace ₿ {
           };
           vector<string> ssl_context(const string &crt, const string &key) {
             vector<string> warn;
-            ctx = SSL_CTX_new(SSLv23_server_method());
+            ctx.reset(SSL_CTX_new(TLS_server_method()));
             if (ctx) {
-              SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv3);
+              SSL_CTX_set_options(ctx.get(), SSL_OP_NO_SSLv3);
               if (crt.empty() or key.empty()) {
                 if (!crt.empty())
                   warn.emplace_back("Ignored .crt file because .key file is missing");
                 if (!key.empty())
                   warn.emplace_back("Ignored .key file because .crt file is missing");
-                warn.emplace_back("Connected web clients will enjoy unsecure SSL encryption.."
-                  ANSI_NEW_LINE
-                  "(because the private key is visible in the source!). See --help argument to setup your own SSL");
-                if (!SSL_CTX_use_certificate(ctx,
-                  PEM_read_bio_X509(BIO_new_mem_buf((void*)
-                    "-----BEGIN CERTIFICATE-----"                                      ANSI_NEW_LINE
-                    "MIICATCCAWoCCQCiyDyPL5ov3zANBgkqhkiG9w0BAQsFADBFMQswCQYDVQQGEwJB" ANSI_NEW_LINE
-                    "VTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50ZXJuZXQgV2lkZ2l0" ANSI_NEW_LINE
-                    "cyBQdHkgTHRkMB4XDTE2MTIyMjIxMDMyNVoXDTE3MTIyMjIxMDMyNVowRTELMAkG" ANSI_NEW_LINE
-                    "A1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoMGEludGVybmV0" ANSI_NEW_LINE
-                    "IFdpZGdpdHMgUHR5IEx0ZDCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAunyx" ANSI_NEW_LINE
-                    "1lNsHkMmCa24Ns9xgJAwV3A6/Jg/S5jPCETmjPRMXqAp89fShZxN2b/2FVtU7q/N" ANSI_NEW_LINE
-                    "EtNpPyEhfAhPwYrkHCtip/RmZ/b6qY2Cx6otFIsuwO8aUV27CetpoM8TAQSuufcS" ANSI_NEW_LINE
-                    "jcZD9pCAa9GM/yWeqc45su9qBBmLnAKYuYUeDQUCAwEAATANBgkqhkiG9w0BAQsF" ANSI_NEW_LINE
-                    "AAOBgQAeZo4zCfnq5/6gFzoNDKg8DayoMnCtbxM6RkJ8b/MIZT5p6P7OcKNJmi1o" ANSI_NEW_LINE
-                    "XD2evdxNrY0ObQ32dpiLqSS1JWL8bPqloGJBNkSPi3I+eBoJSE7/7HOroLNbp6nS" ANSI_NEW_LINE
-                    "aaec6n+OlGhhjxn0DzYiYsVBUsokKSEJmHzoLHo3ZestTTqUwg=="             ANSI_NEW_LINE
-                    "-----END CERTIFICATE-----"                                        ANSI_NEW_LINE
-                  , -1), nullptr, nullptr, nullptr
-                )) or !SSL_CTX_use_PrivateKey(ctx,
-                  PEM_read_bio_PrivateKey(BIO_new_mem_buf((void*)
-                    "-----BEGIN RSA PRIVATE KEY-----"                                  ANSI_NEW_LINE
-                    "MIICXAIBAAKBgQC6fLHWU2weQyYJrbg2z3GAkDBXcDr8mD9LmM8IROaM9ExeoCnz" ANSI_NEW_LINE
-                    "19KFnE3Zv/YVW1Tur80S02k/ISF8CE/BiuQcK2Kn9GZn9vqpjYLHqi0Uiy7A7xpR" ANSI_NEW_LINE
-                    "XbsJ62mgzxMBBK659xKNxkP2kIBr0Yz/JZ6pzjmy72oEGYucApi5hR4NBQIDAQAB" ANSI_NEW_LINE
-                    "AoGBAJi9OrbtOreKjeQNebzCqRcAgeeLz3RFiknzjVYbgK1gBhDWo6XJVe8C9yxq" ANSI_NEW_LINE
-                    "sjYJyQV5zcAmkaQYEaHR+OjvRiZ4UmXbItukOD+dnq7xs69n3w54FfANjkurdL2M" ANSI_NEW_LINE
-                    "fPAQm/GJT4TSBDIr7eJQPOrork9uxQStwADTqvklVlKm2YldAkEA80ZYaLrGOBbz" ANSI_NEW_LINE
-                    "5871ewKxtVJNCCmXdYUwq7nI/lqsLBZnB+wiwnQ+3tgfi4YoUoTnv0hIIwkyLYl9" ANSI_NEW_LINE
-                    "Z2wqensf6wJBAMQ96gUGnIcYJzknB5CYDNQalcvvTx7tLtgRXDf47bQJ3X/Q5k/t" ANSI_NEW_LINE
-                    "yDlByUBqvYVShXWs+d4ynNKLze/w18H8Os8CQBYFDAOOxFpXWYRl6zpTKBqtdGOE" ANSI_NEW_LINE
-                    "wDzW7WzdyB+dvW/QJ0tESHEpbHdnQJO0dPnjJcbemAjz0CLnCv7Nf5rOgjkCQE3Q" ANSI_NEW_LINE
-                    "izIw+/JptmvoOQyx7ixQ2mNCYmpN/Iw63gln0MHaQ5WCPUEmdYWWu3mqmbn7Deaq" ANSI_NEW_LINE
-                    "j233Pc4TF7b0FmnaXWsCQAVvyLVU3a9Yactb5MXaN+rEYjUW37GSo+Q1lXfm0OwF" ANSI_NEW_LINE
-                    "EJB7X66Bavwg4MCfpGykS71OxhTEfDu+y1gylPMCGHY="                     ANSI_NEW_LINE
-                    "-----END RSA PRIVATE KEY-----"                                    ANSI_NEW_LINE
-                  , -1), nullptr, nullptr, nullptr)
-                )) ctx = nullptr;
+                const char tlscrt[] = "-----BEGIN CERTIFICATE-----"                  ANSI_NEW_LINE
+                  "MIIDJTCCAg2gAwIBAgIBAjANBgkqhkiG9w0BAQsFADASMRAwDgYDVQQDDAdSb290" ANSI_NEW_LINE
+                  "IENBMCAXDTE2MDExNDIyMjk0NloYDzIxMTYwMTE1MjIyOTQ2WjAZMRcwFQYDVQQD" ANSI_NEW_LINE
+                  "DA5zZXJ2ZXIuZXhhbXBsZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB" ANSI_NEW_LINE
+                  "ANVdYGrf/GHuSKqMEUhDpW22Ul2qmEmxYZI1sfw6BCUMbXn/tNXJ6VwcO+Crs7h9" ANSI_NEW_LINE
+                  "o95tveDd11q/FEcRQl6mgtBhwX/dE0bmCYUHDvLU/Bpk0gqtIKsga5bwrczEGVNV" ANSI_NEW_LINE
+                  "3AEdpLPvirRJU12KBRzx3OFEv8XX4ncZV1yXC3XuiENxD8pswbSyUKd3RmxYDxG/" ANSI_NEW_LINE
+                  "8XYkWq45QrdRZynh0FUwbxfkkeqt+CjCQ2+iZKn7nZiSYkg+6w1PgkqK/z9y7pa1" ANSI_NEW_LINE
+                  "rqHBmLrvfZB1bf9aUp6r9cB+0IdD24UHBw99OHr90dPuZR3T6jlqhzfuStPgDW71" ANSI_NEW_LINE
+                  "cKzCvfFu85KVXqnwoWWVk40CAwEAAaN9MHswHQYDVR0OBBYEFMDnhL/oWSczELBS" ANSI_NEW_LINE
+                  "T1FSLwbWwHrNMB8GA1UdIwQYMBaAFHB/Lq6DaFmYBCMqzes+F80k3QFJMAkGA1Ud" ANSI_NEW_LINE
+                  "EwQCMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGQYDVR0RBBIwEIIOc2VydmVyLmV4" ANSI_NEW_LINE
+                  "YW1wbGUwDQYJKoZIhvcNAQELBQADggEBAHvTBEN1ig8RrsT716Ginv4gGNX0LzGI" ANSI_NEW_LINE
+                  "RrZ1jO7lm5emuaPNYJpGw0iX5Zdo91qGNXPZaZ75X3S55pQTActq3OPEBOll2pyk" ANSI_NEW_LINE
+                  "iyjz+Zp/v5cfRZLlBbFW5gv2R94eibYr4U3fSn4B0yPcl4xH/l/HzJhGDsSDW8qK" ANSI_NEW_LINE
+                  "8VIJvmvsPwmL0JMCv+FR59F+NFYZdND/KCXet59WUpF9ICmFCoBEX3EyJXEPwhbi" ANSI_NEW_LINE
+                  "X2sdPzJbCjx0HLli8e0HUKNttLQxCsBTRGo6iISLLamwN47mGDa9miBADwGSiz2q" ANSI_NEW_LINE
+                  "YeeuLO02zToHhnQ6KbPXOrQAqcL1kngO4g+j/ru+4AZThFkdkGnltvk="         ANSI_NEW_LINE
+                  "-----END CERTIFICATE-----"                                        ANSI_NEW_LINE;
+                const char tlskey[] = "-----BEGIN PRIVATE KEY-----"                  ANSI_NEW_LINE
+                  "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDVXWBq3/xh7kiq" ANSI_NEW_LINE
+                  "jBFIQ6VttlJdqphJsWGSNbH8OgQlDG15/7TVyelcHDvgq7O4faPebb3g3ddavxRH" ANSI_NEW_LINE
+                  "EUJepoLQYcF/3RNG5gmFBw7y1PwaZNIKrSCrIGuW8K3MxBlTVdwBHaSz74q0SVNd" ANSI_NEW_LINE
+                  "igUc8dzhRL/F1+J3GVdclwt17ohDcQ/KbMG0slCnd0ZsWA8Rv/F2JFquOUK3UWcp" ANSI_NEW_LINE
+                  "4dBVMG8X5JHqrfgowkNvomSp+52YkmJIPusNT4JKiv8/cu6Wta6hwZi6732QdW3/" ANSI_NEW_LINE
+                  "WlKeq/XAftCHQ9uFBwcPfTh6/dHT7mUd0+o5aoc37krT4A1u9XCswr3xbvOSlV6p" ANSI_NEW_LINE
+                  "8KFllZONAgMBAAECggEADLTt7A+A2Vg2jamf0dztejY0e42QWjstI2b9PZc67fXq" ANSI_NEW_LINE
+                  "gyx+WYkX07t+uWegYWliG/oPJ9guXiIpE/5sJHToL37S5kmFP2CtynVcJ4wVo4DD" ANSI_NEW_LINE
+                  "nY0n9+kLX0bgIuS+2V6wpoRcbbbjXM9NHrH8kfe5ftT4UtEDlLI2qLX6IcDd7p4u" ANSI_NEW_LINE
+                  "OYjILChR8GSGTw96yIy2Ws/1Uq9PMw64JoT4RcK5QqnkcPMDFRH1SeLOL+zXP2c4" ANSI_NEW_LINE
+                  "nEl9yOy3HauZKxwl/Ry/XK1s3DdjopIAU29ut+hAuMiTb06kzZnumL9NoplKoZtU" ANSI_NEW_LINE
+                  "otw/gVcCKhT+Ep+p6i8InLF0XEME8A0qUR0niWebgQKBgQD6vkxR49B8ZZQrzjw4" ANSI_NEW_LINE
+                  "XKs1lI9cP7cgPiuWlDHMNjYou3WbOaGrMeScvbB1Ldh9A8pjAhxlw8AaV/xs4qcA" ANSI_NEW_LINE
+                  "trmVmSISVMVyc1wSGlJXWi2nUzTNs9OE3vj22SyStihf8UUZtWwX2b5Y4JrYhA/V" ANSI_NEW_LINE
+                  "+ThGGqHR03oLNLShNLtJc2c7YQKBgQDZ1nkibEyrepexw/fnwkw61IJKq9wRIh1G" ANSI_NEW_LINE
+                  "PREakhbe9wU5ie0knuf9razt7awzQiwFmlixmWqsM7UEtLuXNnNPciwdrKhhbvrd" ANSI_NEW_LINE
+                  "vD/rkbIEHEPllIhFlDtOzn3hRBWTzWmXFjpou/2LvHTSbVis4IYVZymTp2jb1ZLs" ANSI_NEW_LINE
+                  "7VbiG9JTrQKBgQDc6n75g1szzpdehQT/r33U5j/syeJBUSU8NPMu9fB/sLHsgjlT" ANSI_NEW_LINE
+                  "SNEf2+y1QSBE/Or6kmiMrIv7advn30W+Vj9qc5HWTsPrk4HiHTjA553jl2alebN5" ANSI_NEW_LINE
+                  "lK4LZspjtIQcC8mS3goPdXPEgJdM/gWpwzr2YQ6DfOxBJT2j7n64NyoT4QKBgH7/" ANSI_NEW_LINE
+                  "yx+GhCx1DHtXBPDZFhg2TL+78lEK0oZgk9gp06up2CHzh44SFq6O0oLkTcCUk5Ww" ANSI_NEW_LINE
+                  "poTkLIy4mJBlzfgahp+KsK2cO46SZS9g0ONFzcMXt33hWpE2Gl2XhUwPpYTF/QlY" ANSI_NEW_LINE
+                  "rDTjZK5S8Mi9dzVSsNlJi7PJphiEK2R1+nFYRwcBAoGBANWoIG85jpXAOnq/Kcgx" ANSI_NEW_LINE
+                  "Rl3YivR0Ke6r1tFlP58rT7X3EkiboXyQl5vLIFCAwUte6RGrLl1dy3Qyh80B9ySL" ANSI_NEW_LINE
+                  "Jx6vj42CK7vgv6A96TuVYhnXTnEI6ZvwAQ2VGaw4BizhjALs/kdSE/og9aSCs3ws" ANSI_NEW_LINE
+                  "KQypwAFz0tbHxaNag/bSAN0J"                                         ANSI_NEW_LINE
+                  "-----END PRIVATE KEY-----"                                        ANSI_NEW_LINE;
+                unique_ptr<BIO, decltype(&BIO_free)> cbio(
+                  BIO_new_mem_buf(tlscrt, -1),
+                  BIO_free
+                );
+                unique_ptr<BIO, decltype(&BIO_free)> pbio(
+                  BIO_new_mem_buf(tlskey, -1),
+                  BIO_free
+                );
+                unique_ptr<X509, decltype(&X509_free)> cert(
+                  PEM_read_bio_X509(cbio.get(), nullptr, nullptr, nullptr),
+                  X509_free
+                );
+                unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pkey(
+                  PEM_read_bio_PrivateKey(pbio.get(), nullptr, nullptr, nullptr),
+                  EVP_PKEY_free
+                );
+                if (!SSL_CTX_use_certificate(ctx.get(), cert.get())
+                  or !SSL_CTX_use_PrivateKey(ctx.get(), pkey.get())
+                ) {
+                  ctx.reset();
+                  warn.emplace_back("Unable to encrypt web clients using internal cert because it seems to be out of date, will fallback to plain text");
+                } else  
+                  warn.emplace_back("Connected web clients will enjoy unsecure SSL encryption.." ANSI_NEW_LINE
+                    "(because the key is visible in the source) See --help argument to setup your own SSL");
               } else {
                 if (access(crt.data(), R_OK) == -1)
                   warn.emplace_back("Unable to read SSL .crt file at " + crt);
                 if (access(key.data(), R_OK) == -1)
                   warn.emplace_back("Unable to read SSL .key file at " + key);
-                if (!SSL_CTX_use_certificate_file(ctx, crt.data(), SSL_FILETYPE_PEM)
-                  or !SSL_CTX_use_PrivateKey_file(ctx, key.data(), SSL_FILETYPE_PEM)
+                if (!SSL_CTX_use_certificate_file(ctx.get(), crt.data(), SSL_FILETYPE_PEM)
+                  or !SSL_CTX_use_PrivateKey_file(ctx.get(), key.data(), SSL_FILETYPE_PEM)
                 ) {
-                  ctx = nullptr;
-                  warn.emplace_back("Unable to encrypt web clients, will fallback to plain text");
+                  ctx.reset();
+                  warn.emplace_back("Unable to encrypt web clients using the .crt and .key files, will fallback to plain text");
                 }
               }
             }
@@ -1251,10 +1286,11 @@ namespace ₿ {
 #endif
             SSL *ssl = nullptr;
             if (ctx) {
-              ssl = SSL_new(ctx);
+              ssl = SSL_new(ctx.get());
               SSL_set_accept_state(ssl);
               SSL_set_fd(ssl, clientfd);
               SSL_set_mode(ssl, SSL_MODE_RELEASE_BUFFERS);
+              SSL_set_mode(ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
             }
             requests.emplace_back(clientfd, loopfd, ssl, &session);
           };
@@ -1351,5 +1387,25 @@ namespace ₿ {
         stream << round(input);
         return stream.str();
       };
+  };
+
+  class Files {
+    public:
+      static bool mkdirs(const string &file) {
+        size_t has_dir = file.find_last_of("/\\");
+        if (has_dir != string::npos) {
+          string dir = file.substr(0, has_dir);
+          if (access(dir.data(), R_OK) == -1) {
+            mkdir(dir.data()
+#ifndef _WIN32
+            , 0775
+#endif
+            );
+            if (access(dir.data(), R_OK) == -1)
+              return false;
+          }
+        }
+        return true;
+      }
   };
 }

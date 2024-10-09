@@ -6,16 +6,19 @@ import {Socket, Models} from 'lib/K';
   selector: 'client',
   template: `<div class="row">
       <div class="col-md-12 col-xs-12">
-          <div class="row">
-            <div hidden="true">
-              <settings
-                [product]="product"
-                [settings]="settings"></settings>
-            </div>
+          <div class="col-md-6">
+            <settings
+              [product]="product"
+              [settings]="settings"></settings>
             <wallets
               [wallets]="wallets"
               [markets]="markets"
               [settings]="settings"></wallets>
+          </div>
+          <div class="col-md-6">
+            <orders
+             [orders]="orders"
+             [markets]="markets"></orders>
           </div>
       </div>
   </div>`
@@ -25,6 +28,8 @@ export class ClientComponent implements OnInit {
   private wallets: any = null;
 
   private markets: any = null;
+
+  private orders: Models.Order[] = [];
 
   private settings: Models.PortfolioParameters = new Models.PortfolioParameters();
 
@@ -47,5 +52,9 @@ export class ClientComponent implements OnInit {
     new Socket.Subscriber(Models.Topics.Position)
       .registerSubscriber((o: any[]) => { this.wallets = o; })
       .registerDisconnectedHandler(() => { this.wallets = null; });
+
+    new Socket.Subscriber(Models.Topics.OrderStatusReports)
+      .registerSubscriber((o: Models.Order[]) => { this.orders = o; })
+      .registerDisconnectedHandler(() => { this.orders = []; });
   };
 };

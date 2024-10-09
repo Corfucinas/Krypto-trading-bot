@@ -8,7 +8,7 @@ V_CURL  = 8.10.1
 V_SQL   = 3460100
 V_JSON  = 3.11.3
 V_CATCH = 2.13.10
-V_UV    = 1.48.0
+V_UV    = 1.49.0
 
 KBUILD := $(abspath ../../build-$(KHOST))
 
@@ -62,19 +62,24 @@ openssl:
 	--prefix=$(KBUILD) --cross-compile-prefix=$(CHOST)- && make install_dev                               )
 
 curl:
-	test -d $(KBUILD)/var/curl-$(V_CURL) || (                                                  \
-	curl -L https://curl.haxx.se/download/curl-$(V_CURL).tar.gz | tar xz -C $(KBUILD)/var      \
-	&& cd $(KBUILD)/var/curl-$(V_CURL) && mkdir -p ssl && curl --etag-compare ssl/cacert.etag  \
-	--etag-save ssl/cacert.etag https://curl.se/ca/cacert.pem -o ssl/cacert.pem                \
-	&& PKG_CONFIG="pkg-config --static" PKG_CONFIG_PATH=$(KBUILD)/lib/pkgconfig ./configure    \
-	--host=$(CHOST) --prefix=$(KBUILD) --with-zlib=$(KBUILD) --disable-manual --disable-docs   \
-	--disable-file --disable-telnet --disable-ftp --disable-smtp --disable-ldap --disable-ares \
-	$(if $(findstring mingw32,$(CHOST)),--with-schannel,--with-openssl=$(KBUILD)               \
-	--with-ca-embed=$(KBUILD)/var/ssl/curl-ca-bundle.crt) --disable-imap --disable-pop3        \
-	--disable-rtsp  --without-libidn2 --without-librtmp  --without-nghttp2 --without-zstd      \
-	--disable-tftp --disable-smb --disable-sspi --disable-dict --without-libpsl                \
-	--without-brotli --without-libssh2 --disable-gopher --disable-shared --enable-static       \
-	&& make && (cd lib && make install) && (cd include && make install)                        )
+	test -d $(KBUILD)/var/curl-$(V_CURL) || (                                                       \
+	curl -L https://curl.haxx.se/download/curl-$(V_CURL).tar.gz | tar xz -C $(KBUILD)/var           \
+	&& cd $(KBUILD)/var/curl-$(V_CURL) && mkdir -p ssl && curl --etag-compare ssl/cacert.etag       \
+	--etag-save ssl/cacert.etag https://curl.se/ca/cacert.pem -o ssl/cacert.pem                     \
+	&& PKG_CONFIG="pkg-config --static" PKG_CONFIG_PATH=$(KBUILD)/lib/pkgconfig ./configure         \
+	--host=$(CHOST) --prefix=$(KBUILD) --with-zlib=$(KBUILD)                                        \
+	$(if $(findstring mingw32,$(CHOST)),--with-schannel,--with-openssl=$(KBUILD)                    \
+	--with-ca-embed=$(KBUILD)/var/curl-$(V_CURL)/ssl/cacert.pem)                                    \
+	--disable-docs --disable-manual  --disable-gopher  --disable-imap   --disable-ftp               \
+	--disable-file --without-librtmp --disable-telnet  --disable-pop3   --disable-smb               \
+	--disable-rtsp --without-libidn2 --without-zstd    --disable-smtp   --disable-ldap              \
+	--disable-tftp --without-libssh2 --without-libpsl  --disable-sspi   --disable-ares              \
+	--disable-dict --without-nghttp2 --without-brotli  --disable-shared --enable-static             \
+	&& make && (cd lib && make install) && (cd include && make install)                             \
+	&& (echo "#define curl_easy_setopt_nowin32(a, b, c) $(if $(findstring mingw32,$(CHOST)),        \
+	,curl_easy_setopt(a, b, c))" && echo "`grep extern src/tool_ca_embed.c |                        \
+	cut -d';' -f1`;") > $(KBUILD)/include/curl/cacert_embed.h                                       \
+	&& cp -v src/tool_ca_embed.o $(KBUILD)/lib/cacert_embed.o                                       )
 
 sqlite:
 	test -d $(KBUILD)/var/sqlite-autoconf-$(V_SQL) || (                                       \
@@ -99,9 +104,7 @@ uv:
 	test -d $(KBUILD)/var/libuv-$(V_UV) || (                                                          \
 	curl -L https://github.com/libuv/libuv/archive/v$(V_UV).tar.gz | tar xz -C $(KBUILD)/var          \
 	&& cd $(KBUILD)/var/libuv-$(V_UV) && sh autogen.sh && CC=$(CHOST)-gcc ./configure --host=$(CHOST) \
-	--prefix=$(KBUILD) --disable-shared --enable-static && make all install                           \
-	$(if $(findstring mingw32,$(CHOST)),                                                              \
-	&& sed -i "s/\(#define SIGQUIT\)/\/\/\1/" $(KBUILD)/include/uv/win.h))                            )
+	--prefix=$(KBUILD) --disable-shared --enable-static && make all install)                          )
 
 pvs:
 ifndef V_PVS
